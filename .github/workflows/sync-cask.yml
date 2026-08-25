@@ -1,0 +1,99 @@
+name: Cask aktualisieren
+
+# Holt die neueste Version aus den öffentlichen Releases von
+# immodigit/blitztext-app und schreibt Version + SHA256 in das Cask.
+#
+# Bewusst ziehend statt schiebend: Ein Push aus dem App-Repo hierher bräuchte
+# ein langlebiges Token (PAT oder GitHub App), weil das GITHUB_TOKEN immer nur
+# auf sein eigenes Repository schreiben darf — daran ändert auch keine
+# Repository- oder Org-Einstellung etwas. Umgekehrt reicht das GITHUB_TOKEN
+# dieses Repos vollkommen, und das Release drüben ist öffentlich: zum Lesen
+# braucht es gar keine Anmeldung. Damit kommt die ganze Kette ohne Secret aus.
+#
+# Zu wissen: GitHub schaltet geplante Workflows in öffentlichen Repos nach
+# 60 Tagen ohne Repository-Aktivität ab. Jedes Release committet hier und setzt
+# die Frist zurück. Nach einer sehr langen Release-Pause den Lauf einmal von
+# Hand über "Run workflow" anstoßen.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-cask
+
+jobs:
+  sync:
+    name: Version und SHA256 nachziehen
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APP_REPO: immodigit/blitztext-app
+      CASK: Casks/blitztext.rb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Version vergleichen
+        id: check
+        run: |
+          CURRENT="$(sed -nE 's/^[[:space:]]*version "([^"]+)".*/\1/p' "$CASK" | head -1)"
+          LATEST="$(gh release view --repo "$APP_REPO" --json tagName -q .tagName | sed 's/^v//')"
+          if [ -z "$LATEST" ]; then
+            echo "❌ Kein Release in $APP_REPO gefunden."
+            exit 1
+          fi
+          echo "Cask: ${CURRENT:-<leer>} | neuestes Release: $LATEST"
+          if [ "$CURRENT" = "$LATEST" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Cask ist aktuell — nichts zu tun."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: DMG holen und SHA256 bilden
+        id: dmg
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          V="${{ steps.check.outputs.version }}"
+          DMG="Blitztext-$V.dmg"
+          # release-please legt Tag und Release sofort an, das notarisierte DMG
+          # hängt release.yml erst nach Build und Notarisierung an. Bis dahin
+          # sauber aussteigen statt rot zu werden — der nächste Lauf holt es nach.
+          if ! gh release view "v$V" --repo "$APP_REPO" --json assets -q '.assets[].name' | grep -qx "$DMG"; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$DMG hängt noch nicht an Release v$V — Build läuft vermutlich noch."
+            exit 0
+          fi
+          gh release download "v$V" --repo "$APP_REPO" --pattern "$DMG" --dir "$RUNNER_TEMP" --clobber
+          echo "sha256=$(sha256sum "$RUNNER_TEMP/$DMG" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Cask schreiben und committen
+        if: steps.dmg.outputs.ready == 'true'
+        run: |
+          V="${{ steps.check.outputs.version }}"
+          SHA="${{ steps.dmg.outputs.sha256 }}"
+          # Die Cask-Vorlage bleibt im App-Repo die einzige Quelle — und zwar in
+          # dem Stand, der zu diesem Release gehört (?ref=v$V), nicht main.
+          gh api "repos/$APP_REPO/contents/homebrew/Casks/blitztext.rb?ref=v$V" \
+            -H "Accept: application/vnd.github.raw" > "$CASK"
+          sed -i -E "s/^([[:space:]]*)version \"[^\"]*\"/\1version \"$V\"/" "$CASK"
+          sed -i -E "s/^([[:space:]]*)sha256 \"[^\"]*\"/\1sha256 \"$SHA\"/" "$CASK"
+
+          if git diff --quiet -- "$CASK"; then
+            echo "Cask inhaltlich unverändert."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$CASK"
+          git commit -m "Blitztext $V"
+          git push
+          echo "✅ Cask auf $V ($SHA) gehoben."
