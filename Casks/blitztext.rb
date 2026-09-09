@@ -1,6 +1,6 @@
 cask "blitztext" do
-  version "1.5.1"
-  sha256 "b165608dc93960d3d67d416d746b07f94e5baa276c1f448645d7f4b3641a3395"
+  version "1.7.1"
+  sha256 "0e55aa5e9882ac7d14ad145c47c66adc9929d1b7f4619433062c77511ec21940"
 
   url "https://github.com/immodigit/blitztext-app/releases/download/v#{version}/Blitztext-#{version}.dmg"
   name "Blitztext"
